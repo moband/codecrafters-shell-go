@@ -31,6 +31,17 @@ func main() {
 			continue
 		}
 
+		if len(command) > 5 && command[:5] == "type " {
+			cmd := command[5:]
+			switch cmd {
+			case "echo", "exit", "type":
+				fmt.Printf("%s is a shell builtin\n", cmd)
+			default:
+				fmt.Printf("%s not found\n", cmd)
+			}
+			continue
+		}
+
 		fmt.Println(command + ": command not found")
 	}
 }
