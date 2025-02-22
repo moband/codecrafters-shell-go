@@ -9,25 +9,36 @@ import (
 	"strings"
 )
 
-// Ensures gofmt doesn't remove the "fmt" import in stage 1 (feel free to remove this!)
-var _ = fmt.Fprint
-
 func parseCommand(command string) []string {
 	var args []string
 	var current strings.Builder
-	inQuotes := false
+	inSingleQuotes := false
+	inDoubleQuotes := false
+	i := 0
 
-	for i := 0; i < len(command); i++ {
-		if command[i] == '\'' && !inQuotes {
-			inQuotes = true
+	for i < len(command) {
+		if command[i] == '\'' && !inDoubleQuotes {
+			inSingleQuotes = !inSingleQuotes
+			i++
 			continue
 		}
-		if command[i] == '\'' && inQuotes {
-			inQuotes = false
+
+		if command[i] == '"' && !inSingleQuotes {
+			inDoubleQuotes = !inDoubleQuotes
+			i++
 			continue
 		}
 
-		if command[i] == ' ' && !inQuotes {
+		if command[i] == '\\' && inDoubleQuotes && i+1 < len(command) {
+			next := command[i+1]
+			if next == '\\' || next == '$' || next == '"' || next == '\n' {
+				current.WriteByte(next)
+				i += 2
+				continue
+			}
+		}
+
+		if command[i] == ' ' && !inSingleQuotes && !inDoubleQuotes {
 			if current.Len() > 0 {
 				args = append(args, current.String())
 				current.Reset()
@@ -35,6 +46,7 @@ func parseCommand(command string) []string {
 		} else {
 			current.WriteByte(command[i])
 		}
+		i++
 	}
 
 	if current.Len() > 0 {
