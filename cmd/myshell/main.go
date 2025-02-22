@@ -34,10 +34,20 @@ func main() {
 			continue
 		}
 
+		if command == "pwd" {
+			wd, err := os.Getwd()
+			if err != nil {
+				fmt.Fprint(os.Stderr, err)
+			} else {
+				fmt.Println(wd)
+			}
+			continue
+		}
+
 		if len(command) > 5 && command[:5] == "type " {
 			cmd := command[5:]
 			switch cmd {
-			case "echo", "exit", "type":
+			case "echo", "exit", "type", "pwd":
 				fmt.Printf("%s is a shell builtin\n", cmd)
 			default:
 				pathDirs := strings.Split(os.Getenv("PATH"), ":")
