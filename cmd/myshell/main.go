@@ -17,6 +17,13 @@ func parseCommand(command string) []string {
 	i := 0
 
 	for i < len(command) {
+
+		if command[i] == '\\' && !inSingleQuotes && !inDoubleQuotes && i+1 < len(command) {
+			current.WriteByte(command[i+1])
+			i += 2
+			continue
+		}
+
 		if command[i] == '\'' && !inDoubleQuotes {
 			inSingleQuotes = !inSingleQuotes
 			i++
