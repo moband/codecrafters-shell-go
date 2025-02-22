@@ -44,10 +44,18 @@ func main() {
 			continue
 		}
 
+		if len(command) > 3 && command[:3] == "cd " {
+			dir := command[3:]
+			if err := os.Chdir(dir); err != nil {
+				fmt.Printf("cd: %s: No such file or directory\n", dir)
+			}
+			continue
+		}
+
 		if len(command) > 5 && command[:5] == "type " {
 			cmd := command[5:]
 			switch cmd {
-			case "echo", "exit", "type", "pwd":
+			case "echo", "exit", "type", "pwd", "cd":
 				fmt.Printf("%s is a shell builtin\n", cmd)
 			default:
 				pathDirs := strings.Split(os.Getenv("PATH"), ":")
