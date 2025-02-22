@@ -46,6 +46,16 @@ func main() {
 
 		if len(command) > 3 && command[:3] == "cd " {
 			dir := command[3:]
+
+			if dir == "~" {
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					fmt.Fprint(os.Stderr, err)
+					continue
+				}
+				dir = homeDir
+			}
+
 			if err := os.Chdir(dir); err != nil {
 				fmt.Printf("cd: %s: No such file or directory\n", dir)
 			}
