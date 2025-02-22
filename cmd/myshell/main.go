@@ -67,18 +67,22 @@ type CommandHandler struct {
 	command    string
 	args       []string
 	outputFile string
+	stderrFile string
 }
 
 func NewCommandHandler(command string) *CommandHandler {
 	args := parseCommand(command)
 
-	var outputFile string
+	var outputFile, stderrFile string
 	newArgs := make([]string, 0, len(args))
 
 	for i := 0; i < len(args); i++ {
 
 		if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
 			outputFile = args[i+1]
+			i++
+		} else if args[i] == "2>" && i+1 < len(args) {
+			stderrFile = args[i+1]
 			i++
 		} else {
 			newArgs = append(newArgs, args[i])
@@ -89,6 +93,7 @@ func NewCommandHandler(command string) *CommandHandler {
 		command:    command,
 		args:       newArgs,
 		outputFile: outputFile,
+		stderrFile: stderrFile,
 	}
 }
 
@@ -110,6 +115,20 @@ func (ch *CommandHandler) Execute() {
 		defer func() {
 			file.Close()
 			os.Stdout = stdout
+		}()
+	}
+
+	if ch.stderrFile != "" {
+		stderr := os.Stderr
+		file, err := os.Create(ch.stderrFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+			return
+		}
+		os.Stderr = file
+		defer func() {
+			file.Close()
+			os.Stderr = stderr
 		}()
 	}
 
@@ -217,7 +236,18 @@ func (ch *CommandHandler) handleExternal() {
 				cmd.Stdout = os.Stdout
 			}
 
-			cmd.Stderr = os.Stderr
+			if ch.stderrFile != "" {
+				file, err := os.Create(ch.stderrFile)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+					return
+				}
+				defer file.Close()
+				cmd.Stderr = file
+			} else {
+				cmd.Stderr = os.Stderr
+			}
+
 			cmd.Args[0] = ch.args[0]
 			cmd.Run()
 			break
