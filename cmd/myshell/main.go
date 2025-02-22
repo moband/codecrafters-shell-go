@@ -64,21 +64,53 @@ func parseCommand(command string) []string {
 }
 
 type CommandHandler struct {
-	command string
-	args    []string
+	command    string
+	args       []string
+	outputFile string
 }
 
 func NewCommandHandler(command string) *CommandHandler {
 	args := parseCommand(command)
+
+	var outputFile string
+	newArgs := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+
+		if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
+			outputFile = args[i+1]
+			i++
+		} else {
+			newArgs = append(newArgs, args[i])
+		}
+	}
+
 	return &CommandHandler{
-		command: command,
-		args:    args,
+		command:    command,
+		args:       newArgs,
+		outputFile: outputFile,
 	}
 }
 
 func (ch *CommandHandler) Execute() {
 	if len(ch.args) == 0 {
 		return
+	}
+
+	var stdout *os.File
+
+	if ch.outputFile != "" {
+		stdout = os.Stdout
+		file, err := os.Create(ch.outputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+			return
+		}
+		os.Stdout = file
+		defer func() {
+			file.Close()
+			os.Stdout = stdout
+		}()
 	}
 
 	switch ch.args[0] {
@@ -148,7 +180,7 @@ func (ch *CommandHandler) handleType() {
 	case "echo", "exit", "type", "pwd", "cd":
 		fmt.Printf("%s is a shell builtin\n", cmd)
 	default:
-		pathDirs := strings.Split(os.Getenv("PATH"), ":")
+		pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
 		found := false
 		for _, dir := range pathDirs {
 			executablePath := filepath.Join(dir, cmd)
@@ -165,19 +197,29 @@ func (ch *CommandHandler) handleType() {
 }
 
 func (ch *CommandHandler) handleExternal() {
-	pathDirs := strings.Split(os.Getenv("PATH"), ":")
+	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
 	found := false
 	for _, dir := range pathDirs {
 		executablePath := filepath.Join(dir, ch.args[0])
 		if _, err := os.Stat(executablePath); err == nil {
 			found = true
 			cmd := exec.Command(executablePath, ch.args[1:]...)
-			cmd.Stdout = os.Stdout
+
+			if ch.outputFile != "" {
+				file, err := os.Create(ch.outputFile)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+					return
+				}
+				defer file.Close()
+				cmd.Stdout = file
+			} else {
+				cmd.Stdout = os.Stdout
+			}
+
 			cmd.Stderr = os.Stderr
 			cmd.Args[0] = ch.args[0]
-			if err := cmd.Run(); err != nil {
-				fmt.Fprint(os.Stderr, err)
-			}
+			cmd.Run()
 			break
 		}
 	}
