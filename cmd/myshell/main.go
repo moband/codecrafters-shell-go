@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // Ensures gofmt doesn't remove the "fmt" import in stage 1 (feel free to remove this!)
@@ -37,7 +39,19 @@ func main() {
 			case "echo", "exit", "type":
 				fmt.Printf("%s is a shell builtin\n", cmd)
 			default:
-				fmt.Printf("%s not found\n", cmd)
+				pathDirs := strings.Split(os.Getenv("PATH"), ":")
+				found := false
+				for _, dir := range pathDirs {
+					executablePath := filepath.Join(dir, cmd)
+					if _, err := os.Stat(executablePath); err == nil {
+						fmt.Printf("%s is %s\n", cmd, executablePath)
+						found = true
+						break
+					}
+				}
+				if !found {
+					fmt.Printf("%s: not found\n", cmd)
+				}
 			}
 			continue
 		}
