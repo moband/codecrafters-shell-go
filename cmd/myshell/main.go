@@ -64,11 +64,12 @@ func parseCommand(command string) []string {
 }
 
 type CommandHandler struct {
-	command    string
-	args       []string
-	outputFile string
-	stderrFile string
-	appendMode bool
+	command      string
+	args         []string
+	outputFile   string
+	stderrFile   string
+	appendMode   bool
+	stderrAppend bool
 }
 
 func NewCommandHandler(command string) *CommandHandler {
@@ -76,6 +77,7 @@ func NewCommandHandler(command string) *CommandHandler {
 
 	var outputFile, stderrFile string
 	var appendMode bool
+	var stderrAppend bool
 	newArgs := make([]string, 0, len(args))
 
 	for i := 0; i < len(args); i++ {
@@ -88,6 +90,10 @@ func NewCommandHandler(command string) *CommandHandler {
 		} else if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
 			outputFile = args[i+1]
 			i++
+		} else if args[i] == "2>>" && i+1 < len(args) {
+			stderrFile = args[i+1]
+			stderrAppend = true
+			i++
 		} else if args[i] == "2>" && i+1 < len(args) {
 			stderrFile = args[i+1]
 			i++
@@ -97,11 +103,12 @@ func NewCommandHandler(command string) *CommandHandler {
 	}
 
 	return &CommandHandler{
-		command:    command,
-		args:       newArgs,
-		outputFile: outputFile,
-		stderrFile: stderrFile,
-		appendMode: appendMode,
+		command:      command,
+		args:         newArgs,
+		outputFile:   outputFile,
+		stderrFile:   stderrFile,
+		appendMode:   appendMode,
+		stderrAppend: stderrAppend,
 	}
 }
 
@@ -138,7 +145,7 @@ func (ch *CommandHandler) Execute() {
 
 	if ch.stderrFile != "" {
 		stderr = os.Stderr
-		file, err := createFile(ch.stderrFile, false)
+		file, err := createFile(ch.stderrFile, ch.stderrAppend)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 			return
@@ -253,7 +260,7 @@ func (ch *CommandHandler) handleExternal() {
 		}
 
 		if ch.stderrFile != "" {
-			file, err := createFile(ch.stderrFile, false)
+			file, err := createFile(ch.stderrFile, ch.stderrAppend)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 				return
