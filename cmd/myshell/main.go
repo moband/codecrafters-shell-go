@@ -68,17 +68,24 @@ type CommandHandler struct {
 	args       []string
 	outputFile string
 	stderrFile string
+	appendMode bool
 }
 
 func NewCommandHandler(command string) *CommandHandler {
 	args := parseCommand(command)
 
 	var outputFile, stderrFile string
+	var appendMode bool
 	newArgs := make([]string, 0, len(args))
 
 	for i := 0; i < len(args); i++ {
 
-		if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
+		if (args[i] == ">>" || args[i] == "1>>") && i+1 < len(args) {
+			outputFile = args[i+1]
+			appendMode = true
+			i++
+
+		} else if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
 			outputFile = args[i+1]
 			i++
 		} else if args[i] == "2>" && i+1 < len(args) {
@@ -94,7 +101,18 @@ func NewCommandHandler(command string) *CommandHandler {
 		args:       newArgs,
 		outputFile: outputFile,
 		stderrFile: stderrFile,
+		appendMode: appendMode,
 	}
+}
+
+func createFile(path string, appendMode bool) (*os.File, error) {
+	flag := os.O_WRONLY | os.O_CREATE
+	if appendMode {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+	return os.OpenFile(path, flag, 0644)
 }
 
 func (ch *CommandHandler) Execute() {
@@ -102,11 +120,11 @@ func (ch *CommandHandler) Execute() {
 		return
 	}
 
-	var stdout *os.File
+	var stdout, stderr *os.File
 
 	if ch.outputFile != "" {
 		stdout = os.Stdout
-		file, err := os.Create(ch.outputFile)
+		file, err := createFile(ch.outputFile, ch.appendMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 			return
@@ -119,8 +137,8 @@ func (ch *CommandHandler) Execute() {
 	}
 
 	if ch.stderrFile != "" {
-		stderr := os.Stderr
-		file, err := os.Create(ch.stderrFile)
+		stderr = os.Stderr
+		file, err := createFile(ch.stderrFile, false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
 			return
@@ -189,6 +207,17 @@ func (ch *CommandHandler) handleCd() {
 	}
 }
 
+func findExecutable(cmd string) (string, bool) {
+	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	for _, dir := range pathDirs {
+		executablePath := filepath.Join(dir, cmd)
+		if _, err := os.Stat(executablePath); err == nil {
+			return executablePath, true
+		}
+	}
+	return "", false
+}
+
 func (ch *CommandHandler) handleType() {
 	if len(ch.args) <= 1 {
 		return
@@ -199,61 +228,45 @@ func (ch *CommandHandler) handleType() {
 	case "echo", "exit", "type", "pwd", "cd":
 		fmt.Printf("%s is a shell builtin\n", cmd)
 	default:
-		pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
-		found := false
-		for _, dir := range pathDirs {
-			executablePath := filepath.Join(dir, cmd)
-			if _, err := os.Stat(executablePath); err == nil {
-				fmt.Printf("%s is %s\n", cmd, executablePath)
-				found = true
-				break
-			}
-		}
-		if !found {
+		if execPath, found := findExecutable(cmd); found {
+			fmt.Printf("%s is %s\n", cmd, execPath)
+		} else {
 			fmt.Printf("%s: not found\n", cmd)
 		}
 	}
 }
 
 func (ch *CommandHandler) handleExternal() {
-	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
-	found := false
-	for _, dir := range pathDirs {
-		executablePath := filepath.Join(dir, ch.args[0])
-		if _, err := os.Stat(executablePath); err == nil {
-			found = true
-			cmd := exec.Command(executablePath, ch.args[1:]...)
+	if execPath, found := findExecutable(ch.args[0]); found {
+		cmd := exec.Command(execPath, ch.args[1:]...)
 
-			if ch.outputFile != "" {
-				file, err := os.Create(ch.outputFile)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
-					return
-				}
-				defer file.Close()
-				cmd.Stdout = file
-			} else {
-				cmd.Stdout = os.Stdout
+		if ch.outputFile != "" {
+			file, err := createFile(ch.outputFile, ch.appendMode)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+				return
 			}
-
-			if ch.stderrFile != "" {
-				file, err := os.Create(ch.stderrFile)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
-					return
-				}
-				defer file.Close()
-				cmd.Stderr = file
-			} else {
-				cmd.Stderr = os.Stderr
-			}
-
-			cmd.Args[0] = ch.args[0]
-			cmd.Run()
-			break
+			defer file.Close()
+			cmd.Stdout = file
+		} else {
+			cmd.Stdout = os.Stdout
 		}
-	}
-	if !found {
+
+		if ch.stderrFile != "" {
+			file, err := createFile(ch.stderrFile, false)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating file: %v\n", err)
+				return
+			}
+			defer file.Close()
+			cmd.Stderr = file
+		} else {
+			cmd.Stderr = os.Stderr
+		}
+
+		cmd.Args[0] = ch.args[0]
+		cmd.Run()
+	} else {
 		fmt.Println(ch.command + ": command not found")
 	}
 }
