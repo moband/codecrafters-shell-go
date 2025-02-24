@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"golang.org/x/term"
@@ -23,20 +24,21 @@ func NewInputHandler(shell *Shell) *InputHandler {
 	return &InputHandler{shell: shell}
 }
 
-func (ih *InputHandler) findCompletion(partial string) (string, bool) {
+func (ih *InputHandler) findCompletion(partial string) ([]string, bool) {
 	if partial == "" {
-		return "", false
+		return nil, false
 	}
 
 	if completion := ih.findBuiltinCompletion(partial); completion != "" {
-		return completion, true
+		return []string{completion}, true
 	}
 
-	if completion := ih.findExecutableCompletion(partial); completion != "" {
-		return completion, true
+	completions := ih.findExecutableCompletion(partial)
+	if len(completions) == 1 {
+		return completions, true
 	}
-
-	return partial, false
+	sort.Strings(completions)
+	return completions, false
 }
 
 func (ih *InputHandler) findBuiltinCompletion(partial string) string {
@@ -48,24 +50,32 @@ func (ih *InputHandler) findBuiltinCompletion(partial string) string {
 	return ""
 }
 
-func (ih *InputHandler) findExecutableCompletion(partial string) string {
-	paths := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
-	for _, path := range paths {
-		files, _ := os.ReadDir(path)
+func (ih *InputHandler) findExecutableCompletion(partial string) []string {
+	var matches []string
+	seen := make(map[string]bool)
+
+	paths := strings.Split(os.Getenv("PATH"), ":")
+	for _, dir := range paths {
+		files, _ := os.ReadDir(dir)
 		for _, file := range files {
-			if strings.HasPrefix(file.Name(), partial) {
+			name := file.Name()
+			if strings.HasPrefix(name, partial) {
 				if info, err := file.Info(); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-					return file.Name()
+					if !seen[name] {
+						matches = append(matches, name)
+						seen[name] = true
+					}
 				}
 			}
 		}
 	}
-	return ""
+	return matches
 }
 
 func (ih *InputHandler) readInput() string {
 	var command strings.Builder
 	buffer := make([]byte, 1)
+	lastWasTab := false
 
 	for {
 		if _, err := os.Stdin.Read(buffer); err != nil {
@@ -82,13 +92,19 @@ func (ih *InputHandler) readInput() string {
 			}
 
 		case tab:
-			if completed, ok := ih.findCompletion(command.String()); ok {
-				fmt.Printf("\r$ %s ", completed)
+			if completions, ok := ih.findCompletion(command.String()); ok {
+				fmt.Printf("\r$ %s ", completions[0])
 				command.Reset()
-				command.WriteString(completed)
+				command.WriteString(completions[0])
 				command.WriteByte(' ')
+
+			} else if len(completions) > 1 && lastWasTab {
+				fmt.Printf("\n\r%s\n\r", strings.Join(completions, "  "))
+				fmt.Printf("$ %s", command.String())
+				lastWasTab = false
 			} else {
 				fmt.Print("\a")
+				lastWasTab = true
 			}
 			continue
 
