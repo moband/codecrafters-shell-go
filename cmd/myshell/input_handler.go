@@ -28,13 +28,39 @@ func (ih *InputHandler) findCompletion(partial string) (string, bool) {
 		return "", false
 	}
 
-	for cmd := range shell.builtins {
-		if strings.HasPrefix(cmd, partial) {
-			return cmd, true
-		}
+	if completion := ih.findBuiltinCompletion(partial); completion != "" {
+		return completion, true
+	}
+
+	if completion := ih.findExecutableCompletion(partial); completion != "" {
+		return completion, true
 	}
 
 	return partial, false
+}
+
+func (ih *InputHandler) findBuiltinCompletion(partial string) string {
+	for cmd := range ih.shell.builtins {
+		if strings.HasPrefix(cmd, partial) {
+			return cmd
+		}
+	}
+	return ""
+}
+
+func (ih *InputHandler) findExecutableCompletion(partial string) string {
+	paths := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	for _, path := range paths {
+		files, _ := os.ReadDir(path)
+		for _, file := range files {
+			if strings.HasPrefix(file.Name(), partial) {
+				if info, err := file.Info(); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+					return file.Name()
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (ih *InputHandler) readInput() string {
