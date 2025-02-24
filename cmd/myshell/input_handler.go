@@ -23,17 +23,18 @@ func NewInputHandler(shell *Shell) *InputHandler {
 	return &InputHandler{shell: shell}
 }
 
-func (ih *InputHandler) findCompletion(partial string) string {
+func (ih *InputHandler) findCompletion(partial string) (string, bool) {
 	if partial == "" {
-		return ""
+		return "", false
 	}
 
 	for cmd := range shell.builtins {
 		if strings.HasPrefix(cmd, partial) {
-			return cmd
+			return cmd, true
 		}
 	}
-	return partial
+
+	return partial, false
 }
 
 func (ih *InputHandler) readInput() string {
@@ -55,11 +56,13 @@ func (ih *InputHandler) readInput() string {
 			}
 
 		case tab:
-			if completed := ih.findCompletion(command.String()); completed != command.String() {
+			if completed, ok := ih.findCompletion(command.String()); ok {
 				fmt.Printf("\r$ %s ", completed)
 				command.Reset()
 				command.WriteString(completed)
 				command.WriteByte(' ')
+			} else {
+				fmt.Print("\a")
 			}
 			continue
 
