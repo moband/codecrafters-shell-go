@@ -1,19 +1,26 @@
 package main
 
-// import "io"
+import "io"
 
-// type lineWriter struct {
-// 	w io.Writer
-// }
+type lineWriter struct {
+	w   io.Writer
+	buf []byte
+}
 
-// func (lw *lineWriter) Write(p []byte) (n int, err error) {
-// 	output := make([]byte, 0, len(p)*2)
-// 	for i := 0; i < len(p); i++ {
-// 		if p[i] == '\n' && (i == 0 || p[i-1] != '\r') {
-// 			output = append(output, '\n', '\r')
-// 		} else {
-// 			output = append(output, p[i])
-// 		}
-// 	}
-// 	return lw.w.Write(output)
-// }
+func (lw *lineWriter) Write(p []byte) (n int, err error) {
+	if lw.buf == nil {
+		lw.buf = make([]byte, 0, 4096)
+	}
+
+	for _, b := range p {
+		if b == '\n' {
+			lw.buf = append(lw.buf, '\n', '\r')
+		} else {
+			lw.buf = append(lw.buf, b)
+		}
+	}
+
+	lw.w.Write(lw.buf)
+	lw.buf = lw.buf[:0]
+	return len(p), err
+}

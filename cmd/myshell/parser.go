@@ -1,55 +1,65 @@
 package main
 
-// import "strings"
+import "strings"
 
-// type Parser struct {
-// 	command string
-// }
+type Parser struct {
+	command string
+}
 
-// func NewParser(command string) *Parser {
-// 	return &Parser{command: command}
-// }
+func NewParser(command string) *Parser {
+	return &Parser{command: command}
+}
 
-// func (p *Parser) Parse() []string {
-// 	var args []string
-// 	var current strings.Builder
-// 	inSingleQuotes := false
-// 	inDoubleQuotes := false
+func (p *Parser) Parse() []string {
+	var args []string
+	var current strings.Builder
+	inSingleQuotes := false
+	inDoubleQuotes := false
+	i := 0
 
-// 	for i := 0; i < len(p.command); i++ {
-// 		switch {
-// 		case p.command[i] == '\\' && !inSingleQuotes && i+1 < len(p.command):
-// 			if !inDoubleQuotes || isEscapableInDoubleQuotes(p.command[i+1]) {
-// 				current.WriteByte(p.command[i+1])
-// 				i++
-// 			} else {
-// 				current.WriteByte(p.command[i])
-// 			}
+	for i < len(p.command) {
 
-// 		case p.command[i] == '\'' && !inDoubleQuotes:
-// 			inSingleQuotes = !inSingleQuotes
+		if p.command[i] == '\\' && !inSingleQuotes && !inDoubleQuotes && i+1 < len(p.command) {
+			current.WriteByte(p.command[i+1])
+			i += 2
+			continue
+		}
 
-// 		case p.command[i] == '"' && !inSingleQuotes:
-// 			inDoubleQuotes = !inDoubleQuotes
+		if p.command[i] == '\'' && !inDoubleQuotes {
+			inSingleQuotes = !inSingleQuotes
+			i++
+			continue
+		}
 
-// 		case p.command[i] == ' ' && !inSingleQuotes && !inDoubleQuotes:
-// 			if current.Len() > 0 {
-// 				args = append(args, current.String())
-// 				current.Reset()
-// 			}
+		if p.command[i] == '"' && !inSingleQuotes {
+			inDoubleQuotes = !inDoubleQuotes
+			i++
+			continue
+		}
 
-// 		default:
-// 			current.WriteByte(p.command[i])
-// 		}
-// 	}
+		if p.command[i] == '\\' && inDoubleQuotes && i+1 < len(p.command) {
+			next := p.command[i+1]
+			if next == '\\' || next == '$' || next == '"' || next == '\n' {
+				current.WriteByte(next)
+				i += 2
+				continue
+			}
+		}
 
-// 	if current.Len() > 0 {
-// 		args = append(args, current.String())
-// 	}
+		if p.command[i] == ' ' && !inSingleQuotes && !inDoubleQuotes {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		} else {
+			current.WriteByte(p.command[i])
+		}
+		i++
+	}
 
-// 	return args
-// }
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
 
-// func isEscapableInDoubleQuotes(ch byte) bool {
-// 	return ch == '\\' || ch == '$' || ch == '"' || ch == '\n'
-// }
+	return args
+}
