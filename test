@@ -1,0 +1,825 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"golang.org/x/term"
+)
+
+const (
+	tab       = 9
+	backspace = 127
+)
+
+type Shell struct {
+	builtins map[string]func(*CommandHandler)
+}
+
+func NewShell() *Shell {
+	s := &Shell{
+		builtins: make(map[string]func(*CommandHandler)),
+	}
+	s.registerBuiltins()
+	return s
+}
+
+func (s *Shell) registerBuiltins() {
+	s.builtins["echo"] = (*CommandHandler).handleEcho
+	s.builtins["exit"] = (*CommandHandler).handleExit
+	s.builtins["pwd"] = (*CommandHandler).handlePwd
+	s.builtins["cd"] = (*CommandHandler).handleCd
+	s.builtins["type"] = (*CommandHandler).handleType
+}
+
+func parseCommand(command string) []string {
+	var args []string
+	var current strings.Builder
+	inSingleQuotes := false
+	inDoubleQuotes := false
+	i := 0
+
+	for i < len(command) {
+
+		if command[i] == '\\' && !inSingleQuotes && !inDoubleQuotes && i+1 < len(command) {
+			current.WriteByte(command[i+1])
+			i += 2
+			continue
+		}
+
+		if command[i] == '\'' && !inDoubleQuotes {
+			inSingleQuotes = !inSingleQuotes
+			i++
+			continue
+		}
+
+		if command[i] == '"' && !inSingleQuotes {
+			inDoubleQuotes = !inDoubleQuotes
+			i++
+			continue
+		}
+
+		if command[i] == '\\' && inDoubleQuotes && i+1 < len(command) {
+			next := command[i+1]
+			if next == '\\' || next == '$' || next == '"' || next == '\n' {
+				current.WriteByte(next)
+				i += 2
+				continue
+			}
+		}
+
+		if command[i] == ' ' && !inSingleQuotes && !inDoubleQuotes {
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		} else {
+			current.WriteByte(command[i])
+		}
+		i++
+	}
+
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+
+	return args
+}
+
+type CommandHandler struct {
+	command      string
+	args         []string
+	outputFile   string
+	stderrFile   string
+	appendMode   bool
+	stderrAppend bool
+}
+
+func NewCommandHandler(command string) *CommandHandler {
+	args := parseCommand(command)
+
+	var outputFile, stderrFile string
+	var appendMode bool
+	var stderrAppend bool
+	newArgs := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+
+		if (args[i] == ">>" || args[i] == "1>>") && i+1 < len(args) {
+			outputFile = args[i+1]
+			appendMode = true
+			i++
+
+		} else if (args[i] == ">" || args[i] == "1>") && i+1 < len(args) {
+			outputFile = args[i+1]
+			i++
+		} else if args[i] == "2>>" && i+1 < len(args) {
+			stderrFile = args[i+1]
+			stderrAppend = true
+			i++
+		} else if args[i] == "2>" && i+1 < len(args) {
+			stderrFile = args[i+1]
+			i++
+		} else {
+			newArgs = append(newArgs, args[i])
+		}
+	}
+
+	return &CommandHandler{
+		command:      command,
+		args:         newArgs,
+		outputFile:   outputFile,
+		stderrFile:   stderrFile,
+		appendMode:   appendMode,
+		stderrAppend: stderrAppend,
+	}
+}
+
+func createFile(path string, appendMode bool) (*os.File, error) {
+	flag := os.O_WRONLY | os.O_CREATE
+	if appendMode {
+		flag |= os.O_APPEND
+	} else {
+		flag |= os.O_TRUNC
+	}
+	return os.OpenFile(path, flag, 0644)
+}
+
+func (ch *CommandHandler) Execute(shell *Shell) {
+	if len(ch.args) == 0 {
+		return
+	}
+
+	var stdout, stderr *os.File
+
+	if ch.outputFile != "" {
+		stdout = os.Stdout
+		file, err := createFile(ch.outputFile, ch.appendMode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating file: %v\n\r", err)
+			return
+		}
+		os.Stdout = file
+		defer func() {
+			file.Close()
+			os.Stdout = stdout
+		}()
+	}
+
+	if ch.stderrFile != "" {
+		stderr = os.Stderr
+		file, err := createFile(ch.stderrFile, ch.stderrAppend)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating file: %v\n\r", err)
+			return
+		}
+		os.Stderr = file
+		defer func() {
+			file.Close()
+			os.Stderr = stderr
+		}()
+	}
+
+	if handler, ok := shell.builtins[ch.args[0]]; ok {
+		handler(ch)
+	} else {
+		ch.handleExternal()
+	}
+}
+
+var oldState *term.State
+
+func (ch *CommandHandler) handleExit() {
+	term.Restore(int(os.Stdin.Fd()), oldState)
+	os.Exit(0)
+}
+
+func (ch *CommandHandler) handleEcho() {
+	if len(ch.args) > 1 {
+		fmt.Fprintf(os.Stdout, "%s\n\r", strings.Join(ch.args[1:], " "))
+	}
+}
+
+func (ch *CommandHandler) handlePwd() {
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n\r", err)
+	} else {
+		fmt.Fprintf(os.Stdout, "%s\n\r", wd)
+	}
+}
+
+func (ch *CommandHandler) handleCd() {
+	if len(ch.args) <= 1 {
+		return
+	}
+
+	dir := ch.args[1]
+	if dir == "~" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n\r", err)
+			return
+		}
+		dir = homeDir
+	}
+
+	if err := os.Chdir(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n\r", dir)
+	}
+}
+
+func findExecutable(cmd string) (string, bool) {
+	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	for _, dir := range pathDirs {
+		executablePath := filepath.Join(dir, cmd)
+		if _, err := os.Stat(executablePath); err == nil {
+			return executablePath, true
+		}
+	}
+	return "", false
+}
+
+func (ch *CommandHandler) handleType() {
+	if len(ch.args) <= 1 {
+		return
+	}
+
+	cmd := ch.args[1]
+	switch cmd {
+	case "echo", "exit", "type", "pwd", "cd":
+		fmt.Fprintf(os.Stdout, "%s is a shell builtin\n\r", cmd)
+	default:
+		if execPath, found := findExecutable(cmd); found {
+			fmt.Fprintf(os.Stdout, "%s is %s\n\r", cmd, execPath)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s: not found\n\r", cmd)
+		}
+	}
+}
+
+func (ch *CommandHandler) handleExternal() {
+	if execPath, found := findExecutable(ch.args[0]); found {
+		cmd := exec.Command(execPath, ch.args[1:]...)
+
+		stdout := &lineWriter{w: os.Stdout}
+		stderr := &lineWriter{w: os.Stderr}
+
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		cmd.Args[0] = ch.args[0]
+		cmd.Run()
+	} else {
+		fmt.Fprintf(os.Stderr, "%s: command not found\n\r", ch.command)
+	}
+}
+
+type lineWriter struct {
+	w io.Writer
+}
+
+func (lw *lineWriter) Write(p []byte) (n int, err error) {
+	output := make([]byte, 0, len(p)*2)
+	for i := 0; i < len(p); i++ {
+		if p[i] == '\n' && (i == 0 || p[i-1] != '\r') {
+			output = append(output, '\n', '\r')
+		} else {
+			output = append(output, p[i])
+		}
+	}
+	return lw.w.Write(output)
+}
+
+func findCompletion(shell *Shell, partial string) string {
+	if partial == "" {
+		return ""
+	}
+
+	for cmd := range shell.builtins {
+		if strings.HasPrefix(cmd, partial) {
+			return cmd
+		}
+	}
+	return partial
+}
+
+func readInput() string {
+	var command strings.Builder
+	buffer := make([]byte, 1)
+
+	for {
+		if _, err := os.Stdin.Read(buffer); err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input: %v\n\r", err)
+			term.Restore(int(os.Stdin.Fd()), oldState)
+			os.Exit(1)
+		}
+
+		switch buffer[0] {
+		case '\r', '\n':
+			fmt.Fprintf(os.Stdout, "\n\r")
+			if cmd := command.String(); cmd != "" {
+				return strings.TrimSpace(cmd)
+			}
+
+		case tab:
+			if completed := findCompletion(shell, command.String()); completed != command.String() {
+				fmt.Printf("\r$ %s ", completed)
+				command.Reset()
+				command.WriteString(completed)
+				command.WriteByte(' ')
+			}
+			continue
+
+		case 4:
+			if command.Len() == 0 {
+				fmt.Fprintf(os.Stdout, "\n\r")
+				term.Restore(int(os.Stdin.Fd()), oldState)
+				os.Exit(0)
+			}
+			continue
+
+		default:
+			fmt.Printf("%c", buffer[0])
+			command.WriteByte(buffer[0])
+			continue
+		}
+
+		break
+	}
+
+	return strings.TrimSpace(command.String())
+}
+
+var shell *Shell
+
+func main() {
+	shell = NewShell()
+
+	var err error
+	oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set raw mode: %v\n\r", err)
+		os.Exit(1)
+	}
+
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		term.Restore(int(os.Stdin.Fd()), oldState)
+		os.Exit(0)
+	}()
+
+	const prompt = "$ "
+
+	for {
+		fmt.Fprint(os.Stdout, prompt)
+		command := readInput()
+		NewCommandHandler(command).Execute(shell)
+	}
+}
+
+// package main
+
+// import (
+// 	"fmt"
+// 	"io"
+// 	"os"
+// 	"os/exec"
+// 	"os/signal"
+// 	"path/filepath"
+// 	"strings"
+// 	"syscall"
+
+// 	"golang.org/x/term"
+// )
+
+// const (
+// 	tab       = 9
+// 	backspace = 127
+// )
+
+// // Shell represents the shell application and its builtin commands
+// type Shell struct {
+// 	builtins map[string]func(*CommandHandler)
+// }
+
+// // NewShell creates and initializes a new Shell instance
+// func NewShell() *Shell {
+// 	s := &Shell{
+// 		builtins: make(map[string]func(*CommandHandler)),
+// 	}
+// 	s.registerBuiltins()
+// 	return s
+// }
+
+// // registerBuiltins registers all builtin shell commands
+// func (s *Shell) registerBuiltins() {
+// 	s.builtins = map[string]func(*CommandHandler){
+// 		"echo": (*CommandHandler).handleEcho,
+// 		"exit": (*CommandHandler).handleExit,
+// 		"pwd":  (*CommandHandler).handlePwd,
+// 		"cd":   (*CommandHandler).handleCd,
+// 		"type": (*CommandHandler).handleType,
+// 	}
+// }
+
+// // Parser handles command parsing logic
+// type Parser struct {
+// 	command string
+// }
+
+// // NewParser creates a new Parser instance
+// func NewParser(command string) *Parser {
+// 	return &Parser{command: command}
+// }
+
+// // Parse parses a command string into arguments, handling quotes and escapes
+// func (p *Parser) Parse() []string {
+// 	var args []string
+// 	var current strings.Builder
+// 	inSingleQuotes := false
+// 	inDoubleQuotes := false
+
+// 	for i := 0; i < len(p.command); i++ {
+// 		switch {
+// 		case p.command[i] == '\\' && !inSingleQuotes && i+1 < len(p.command):
+// 			if !inDoubleQuotes || isEscapableInDoubleQuotes(p.command[i+1]) {
+// 				current.WriteByte(p.command[i+1])
+// 				i++
+// 			} else {
+// 				current.WriteByte(p.command[i])
+// 			}
+
+// 		case p.command[i] == '\'' && !inDoubleQuotes:
+// 			inSingleQuotes = !inSingleQuotes
+
+// 		case p.command[i] == '"' && !inSingleQuotes:
+// 			inDoubleQuotes = !inDoubleQuotes
+
+// 		case p.command[i] == ' ' && !inSingleQuotes && !inDoubleQuotes:
+// 			if current.Len() > 0 {
+// 				args = append(args, current.String())
+// 				current.Reset()
+// 			}
+
+// 		default:
+// 			current.WriteByte(p.command[i])
+// 		}
+// 	}
+
+// 	if current.Len() > 0 {
+// 		args = append(args, current.String())
+// 	}
+
+// 	return args
+// }
+
+// func isEscapableInDoubleQuotes(ch byte) bool {
+// 	return ch == '\\' || ch == '$' || ch == '"' || ch == '\n'
+// }
+
+// // CommandHandler handles command execution and I/O redirection
+// type CommandHandler struct {
+// 	command      string
+// 	args         []string
+// 	outputFile   string
+// 	stderrFile   string
+// 	appendMode   bool
+// 	stderrAppend bool
+// }
+
+// // NewCommandHandler creates a new CommandHandler instance from a command string
+// func NewCommandHandler(command string) *CommandHandler {
+// 	parser := NewParser(command)
+// 	args := parser.Parse()
+// 	ch := &CommandHandler{
+// 		command: command,
+// 		args:    make([]string, 0, len(args)),
+// 	}
+
+// 	ch.parseRedirections(args)
+// 	return ch
+// }
+
+// // RedirectionConfig holds redirection configuration
+// type RedirectionConfig struct {
+// 	outputFile   string
+// 	stderrFile   string
+// 	appendMode   bool
+// 	stderrAppend bool
+// }
+
+// // parseRedirections processes I/O redirection operators in command arguments
+// func (ch *CommandHandler) parseRedirections(args []string) {
+// 	config := &RedirectionConfig{}
+
+// 	for i := 0; i < len(args); i++ {
+// 		switch {
+// 		case (args[i] == ">>" || args[i] == "1>>") && i+1 < len(args):
+// 			config.outputFile = args[i+1]
+// 			config.appendMode = true
+// 			i++
+
+// 		case (args[i] == ">" || args[i] == "1>") && i+1 < len(args):
+// 			config.outputFile = args[i+1]
+// 			i++
+
+// 		case args[i] == "2>>" && i+1 < len(args):
+// 			config.stderrFile = args[i+1]
+// 			config.stderrAppend = true
+// 			i++
+
+// 		case args[i] == "2>" && i+1 < len(args):
+// 			config.stderrFile = args[i+1]
+// 			i++
+
+// 		default:
+// 			ch.args = append(ch.args, args[i])
+// 		}
+// 	}
+
+// 	ch.outputFile = config.outputFile
+// 	ch.stderrFile = config.stderrFile
+// 	ch.appendMode = config.appendMode
+// 	ch.stderrAppend = config.stderrAppend
+// }
+
+// // FileManager handles file operations
+// type FileManager struct{}
+
+// // CreateFile creates or opens a file for writing with the specified mode
+// func (fm *FileManager) CreateFile(path string, appendMode bool) (*os.File, error) {
+// 	flag := os.O_WRONLY | os.O_CREATE
+// 	if appendMode {
+// 		flag |= os.O_APPEND
+// 	} else {
+// 		flag |= os.O_TRUNC
+// 	}
+// 	return os.OpenFile(path, flag, 0644)
+// }
+
+// // Execute executes the command with the current Shell
+// func (ch *CommandHandler) Execute(shell *Shell) {
+// 	if len(ch.args) == 0 {
+// 		return
+// 	}
+
+// 	if err := ch.setupRedirection(); err != nil {
+// 		fmt.Fprintf(os.Stderr, "Error setting up redirection: %v\n\r", err)
+// 		return
+// 	}
+
+// 	if handler, ok := shell.builtins[ch.args[0]]; ok {
+// 		handler(ch)
+// 	} else {
+// 		ch.handleExternal()
+// 	}
+// }
+
+// // setupRedirection configures output redirection for the command
+// func (ch *CommandHandler) setupRedirection() error {
+// 	fm := &FileManager{}
+
+// 	if ch.outputFile != "" {
+// 		file, err := fm.CreateFile(ch.outputFile, ch.appendMode)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to create output file: %w", err)
+// 		}
+// 		os.Stdout = file
+// 		defer func() {
+// 			file.Close()
+// 			os.Stdout = os.NewFile(1, "/dev/stdout")
+// 		}()
+// 	}
+
+// 	if ch.stderrFile != "" {
+// 		file, err := fm.CreateFile(ch.stderrFile, ch.stderrAppend)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to create error file: %w", err)
+// 		}
+// 		os.Stderr = file
+// 		defer func() {
+// 			file.Close()
+// 			os.Stderr = os.NewFile(2, "/dev/stderr")
+// 		}()
+// 	}
+
+// 	return nil
+// }
+
+// var oldState *term.State
+
+// // Command handlers
+// func (ch *CommandHandler) handleExit() {
+// 	term.Restore(int(os.Stdin.Fd()), oldState)
+// 	os.Exit(0)
+// }
+
+// func (ch *CommandHandler) handleEcho() {
+// 	if len(ch.args) > 1 {
+// 		fmt.Fprintf(os.Stdout, "%s\n\r", strings.Join(ch.args[1:], " "))
+// 	}
+// }
+
+// func (ch *CommandHandler) handlePwd() {
+// 	if wd, err := os.Getwd(); err != nil {
+// 		fmt.Fprintf(os.Stderr, "%v\n\r", err)
+// 	} else {
+// 		fmt.Fprintf(os.Stdout, "%s\n\r", wd)
+// 	}
+// }
+
+// func (ch *CommandHandler) handleCd() {
+// 	if len(ch.args) <= 1 {
+// 		return
+// 	}
+
+// 	dir := ch.args[1]
+// 	if dir == "~" {
+// 		homeDir, err := os.UserHomeDir()
+// 		if err != nil {
+// 			fmt.Fprintf(os.Stderr, "%v\n\r", err)
+// 			return
+// 		}
+// 		dir = homeDir
+// 	}
+
+// 	if err := os.Chdir(dir); err != nil {
+// 		fmt.Fprintf(os.Stderr, "cd: %s: No such file or directory\n\r", dir)
+// 	}
+// }
+
+// // ExecutableFinder handles finding executables in PATH
+// type ExecutableFinder struct{}
+
+// // Find searches for an executable in PATH
+// func (ef *ExecutableFinder) Find(cmd string) (string, bool) {
+// 	pathDirs := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+// 	for _, dir := range pathDirs {
+// 		execPath := filepath.Join(dir, cmd)
+// 		if _, err := os.Stat(execPath); err == nil {
+// 			return execPath, true
+// 		}
+// 	}
+// 	return "", false
+// }
+
+// func (ch *CommandHandler) handleType() {
+// 	if len(ch.args) <= 1 {
+// 		return
+// 	}
+
+// 	cmd := ch.args[1]
+// 	switch cmd {
+// 	case "echo", "exit", "type", "pwd", "cd":
+// 		fmt.Fprintf(os.Stdout, "%s is a shell builtin\n\r", cmd)
+// 	default:
+// 		ef := &ExecutableFinder{}
+// 		if execPath, found := ef.Find(cmd); found {
+// 			fmt.Fprintf(os.Stdout, "%s is %s\n\r", cmd, execPath)
+// 		} else {
+// 			fmt.Fprintf(os.Stderr, "%s: not found\n\r", cmd)
+// 		}
+// 	}
+// }
+
+// func (ch *CommandHandler) handleExternal() {
+// 	ef := &ExecutableFinder{}
+// 	execPath, found := ef.Find(ch.args[0])
+// 	if !found {
+// 		fmt.Fprintf(os.Stderr, "%s: command not found\n\r", ch.command)
+// 		return
+// 	}
+
+// 	cmd := exec.Command(execPath, ch.args[1:]...)
+// 	cmd.Stdout = &lineWriter{w: os.Stdout}
+// 	cmd.Stderr = &lineWriter{w: os.Stderr}
+// 	cmd.Args[0] = ch.args[0]
+// 	cmd.Run()
+// }
+
+// // lineWriter adds carriage returns after newlines for terminal output
+// type lineWriter struct {
+// 	w io.Writer
+// }
+
+// func (lw *lineWriter) Write(p []byte) (n int, err error) {
+// 	output := make([]byte, 0, len(p)*2)
+// 	for i := 0; i < len(p); i++ {
+// 		if p[i] == '\n' && (i == 0 || p[i-1] != '\r') {
+// 			output = append(output, '\n', '\r')
+// 		} else {
+// 			output = append(output, p[i])
+// 		}
+// 	}
+// 	return lw.w.Write(output)
+// }
+
+// // InputHandler handles user input and command completion
+// type InputHandler struct {
+// 	shell *Shell
+// }
+
+// // findCompletion finds a matching builtin command for tab completion
+// func (ih *InputHandler) findCompletion(partial string) string {
+// 	if partial == "" {
+// 		return ""
+// 	}
+
+// 	for cmd := range ih.shell.builtins {
+// 		if strings.HasPrefix(cmd, partial) {
+// 			return cmd
+// 		}
+// 	}
+// 	return partial
+// }
+
+// // readInput reads and processes user input with command completion
+// func (ih *InputHandler) readInput() string {
+// 	var command strings.Builder
+// 	buffer := make([]byte, 1)
+
+// 	for {
+// 		if _, err := os.Stdin.Read(buffer); err != nil {
+// 			fmt.Fprintf(os.Stderr, "Error reading input: %v\n\r", err)
+// 			term.Restore(int(os.Stdin.Fd()), oldState)
+// 			os.Exit(1)
+// 		}
+
+// 		switch buffer[0] {
+// 		case '\r', '\n':
+// 			fmt.Fprintf(os.Stdout, "\n\r")
+// 			if cmd := command.String(); cmd != "" {
+// 				return strings.TrimSpace(cmd)
+// 			}
+
+// 		case tab:
+// 			if completed := ih.findCompletion(command.String()); completed != command.String() {
+// 				fmt.Printf("\r$ %s ", completed)
+// 				command.Reset()
+// 				command.WriteString(completed)
+// 				command.WriteByte(' ')
+// 			}
+
+// 		case 4: // Ctrl+D
+// 			if command.Len() == 0 {
+// 				fmt.Fprintf(os.Stdout, "\n\r")
+// 				term.Restore(int(os.Stdin.Fd()), oldState)
+// 				os.Exit(0)
+// 			}
+
+// 		default:
+// 			fmt.Printf("%c", buffer[0])
+// 			command.WriteByte(buffer[0])
+// 			continue
+// 		}
+
+// 		break
+// 	}
+
+// 	return strings.TrimSpace(command.String())
+// }
+
+// var shell *Shell
+
+// func main() {
+// 	shell = NewShell()
+
+// 	var err error
+// 	oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
+// 	if err != nil {
+// 		fmt.Fprintf(os.Stderr, "Failed to set raw mode: %v\n\r", err)
+// 		os.Exit(1)
+// 	}
+// 	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+// 	setupSignalHandler()
+
+// 	const prompt = "$ "
+// 	inputHandler := &InputHandler{shell: shell}
+
+// 	for {
+// 		fmt.Fprint(os.Stdout, prompt)
+// 		command := inputHandler.readInput()
+// 		NewCommandHandler(command).Execute(shell)
+// 	}
+// }
+
+// func setupSignalHandler() {
+// 	sigChan := make(chan os.Signal, 1)
+// 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+// 	go func() {
+// 		<-sigChan
+// 		term.Restore(int(os.Stdin.Fd()), oldState)
+// 		os.Exit(0)
+// 	}()
+// }
