@@ -24,21 +24,47 @@ func NewInputHandler(shell *Shell) *InputHandler {
 	return &InputHandler{shell: shell}
 }
 
-func (ih *InputHandler) findCompletion(partial string) ([]string, bool) {
+func longestCommonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+
+	prefix := strs[0]
+	for i := 1; i < len(strs); i++ {
+		j := 0
+		for j < len(prefix) && j < len(strs[i]) && prefix[j] == strs[i][j] {
+			j++
+		}
+		prefix = prefix[:j]
+		if prefix == "" {
+			break
+		}
+	}
+
+	return prefix
+}
+
+func (ih *InputHandler) findCompletion(partial string) ([]string, bool, string) {
 	if partial == "" {
-		return nil, false
+		return nil, false, ""
 	}
 
 	if completion := ih.findBuiltinCompletion(partial); completion != "" {
-		return []string{completion}, true
+		return []string{completion}, true, completion
 	}
 
 	completions := ih.findExecutableCompletion(partial)
-	if len(completions) == 1 {
-		return completions, true
+	if len(completions) == 0 {
+		return nil, false, ""
 	}
+
+	if len(completions) == 1 {
+		return completions, true, completions[0]
+	}
+
 	sort.Strings(completions)
-	return completions, false
+	commonPrefix := longestCommonPrefix(completions)
+	return completions, commonPrefix == partial, commonPrefix
 }
 
 func (ih *InputHandler) findBuiltinCompletion(partial string) string {
@@ -92,16 +118,27 @@ func (ih *InputHandler) readInput() string {
 			}
 
 		case tab:
-			if completions, ok := ih.findCompletion(command.String()); ok {
-				fmt.Printf("\r$ %s ", completions[0])
-				command.Reset()
-				command.WriteString(completions[0])
-				command.WriteByte(' ')
+			currentCmd := command.String()
+			completions, isExactMatch, commonPrefix := ih.findCompletion(currentCmd)
 
-			} else if len(completions) > 1 && lastWasTab {
-				fmt.Printf("\n\r%s\n\r", strings.Join(completions, "  "))
-				fmt.Printf("$ %s", command.String())
-				lastWasTab = false
+			if len(completions) > 0 {
+				if isExactMatch && len(completions) == 1 {
+					fmt.Printf("\r$ %s ", commonPrefix)
+					command.Reset()
+					command.WriteString(commonPrefix)
+					command.WriteByte(' ')
+				} else if !isExactMatch {
+					fmt.Printf("\r$ %s", commonPrefix)
+					command.Reset()
+					command.WriteString(commonPrefix)
+				} else if lastWasTab {
+					fmt.Printf("\n\r%s\n\r", strings.Join(completions, "  "))
+					fmt.Printf("$ %s", command.String())
+					lastWasTab = false
+				} else {
+					fmt.Print("\a")
+					lastWasTab = true
+				}
 			} else {
 				fmt.Print("\a")
 				lastWasTab = true
@@ -109,7 +146,6 @@ func (ih *InputHandler) readInput() string {
 			continue
 
 		case ctrlD, ctrlC:
-
 			fmt.Fprintf(os.Stdout, "\n\r")
 			term.Restore(int(os.Stdin.Fd()), oldState)
 			os.Exit(0)
